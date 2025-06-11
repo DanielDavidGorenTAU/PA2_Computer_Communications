@@ -3,7 +3,7 @@
 all: wfq.exe
 
 wfq.exe: wfq.cpp
-	clang wfq.cpp -o wfq.exe
+	clang wfq.cpp -Wall -Wextra -Wpedantic -o wfq.exe
 
 clean:
 	del wfq.exe
