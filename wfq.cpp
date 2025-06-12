@@ -16,6 +16,7 @@
 // and it will return the packet with the higher priority.
 class PacketInfo {
 public:
+    // The packet's index in the input.
     uint64_t index;
     // The time when the packet arrived.
     uint64_t time;
