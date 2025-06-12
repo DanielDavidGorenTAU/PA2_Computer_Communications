@@ -5,33 +5,33 @@
 #include <sstream>
 #include <optional>
 #include <vector>
+#include <unordered_map>
+#include <format>
+#include <iomanip>
 
 class PacketInfo {
 public:
     uint64_t time;
-    std::string sadd;
-    std::string sport;
-    std::string dadd;
-    std::string dport;
+    std::string connection;
     uint64_t length;
-    uint64_t weight;
+    double weight;
+    bool should_print_with_weight;
 
     friend std::ostream &operator<<(std::ostream &os, const PacketInfo &self) {
-        return os
-            << "Packet Info: time = " << self.time
-            << ", sadd = " << self.sadd
-            << ", sport = " << self.sport
-            << ", dadd = " << self.dadd
-            << ", dport = " << self.dport
-            << ", length = " << self.length
-            << ", weight = " << self.weight;
+        if (self.should_print_with_weight) {
+            return os << std::format("{} {} {} {:.2f}", self.time, self.connection, self.length, self.weight);
+        }
+        else {
+            return os << self.time << " " << self.connection << " " << self.length;
+        }
     }
 
-    // Suppose that packet 1 has length L1 and weight W1,
-    // and packet 2 has length L2 and weight W2.
-    // Then packet 1 has higher precedence iff W1/L1 > W2/L2.
-    std::strong_ordering operator<=>(const PacketInfo &other) const {
-        return weight * other.length <=> other.weight * length;
+    double priority() const {
+        return weight / length;
+    }
+
+    std::partial_ordering operator<=>(const PacketInfo &other) const {
+        return priority() <=> other.priority();
     }
 
     bool operator==(const PacketInfo &other) const {
@@ -41,37 +41,37 @@ public:
 
 class PacketReader {
     std::optional<PacketInfo> next_packet;
+    std::unordered_map<std::string, double> connection_weights;
 
 public:
-    static PacketInfo parse_packet(const char *input_line) {
+    PacketInfo parse_packet(const char *input_line) {
         PacketInfo result;
-        char sadd_buff[32], sport_buff[32], dadd_buff[32], dport_buff[32];
+        char sadd[32], sport[32], dadd[32], dport[32];
         int num_read = sscanf(
             input_line,
-            "%llu %31s %31s %31s %31s %llu %llu",
-            &result.time, sadd_buff, sport_buff, dadd_buff, dport_buff,
-            &result.length, &result.weight
+            "%llu %31s %31s %31s %31s %llu %lf",
+            &result.time, sadd, sport, dadd, dport, &result.length, &result.weight
         );
-        switch (num_read) {
-            case 6:
-                result.weight = 1;
-                break;
-            case 7:
-                break;
-            default:
-                std::cerr << "bad input line: " << input_line << std::endl;
-                std::abort();
+        result.connection = std::format("{} {} {} {}", sadd, sport, dadd, dport);
+        if (num_read == 6) {
+            auto iter = connection_weights.find(result.connection);
+            result.weight = (iter == connection_weights.end() ? 1 : iter->second);
+            result.should_print_with_weight = false;
         }
-        result.sadd = sadd_buff;
-        result.sport = sport_buff;
-        result.dadd = dadd_buff;
-        result.dport = dport_buff;
+        else if (num_read == 7) {
+            connection_weights.insert_or_assign(result.connection, result.weight);
+            result.should_print_with_weight = true;
+        }
+        else {
+            std::cerr << "bad input line: " << input_line << std::endl;
+            std::abort();
+        }
         return result;
     }
 
-    std::vector<PacketInfo> next_batch_with_timeout(uint64_t max_time) {
-        std::vector<PacketInfo> result;
+    size_t read_batch_with_timeout(uint64_t max_time, std::vector<PacketInfo> &output) {
         std::string line;
+        size_t orig_size = output.size();
         while (true) {
             if (!next_packet.has_value()) {
                 if (!std::getline(std::cin, line)) break;
@@ -79,26 +79,41 @@ public:
             }
             if (next_packet->time > max_time) break;
             max_time = std::min(max_time, next_packet->time);
-            result.push_back(*next_packet);
+            output.push_back(*next_packet);
             next_packet.reset();
         }
-        return result;
+        return output.size() - orig_size;
     }
 
-    std::vector<PacketInfo> next_batch() {
-        return next_batch_with_timeout(std::numeric_limits<uint64_t>::max());
+    size_t read_batch(std::vector<PacketInfo> &output) {
+        return read_batch_with_timeout(std::numeric_limits<uint64_t>::max(), output);
+    }
+
+    size_t read_with_timeout(uint64_t max_time, std::vector<PacketInfo> &output) {
+        size_t sum = 0;
+        while (true) {
+            size_t count = read_batch_with_timeout(max_time, output);
+            if (count == 0) break;
+            sum += count;
+        }
+        return sum;
     }
 };
 
 int main() {
     PacketReader reader;
-    for (uint64_t i = 1;; i++) {
-        std::vector<PacketInfo> batch = reader.next_batch();
-        if (batch.empty()) break;
-        std::cout << "Batch " << i << std::endl;
-        for (auto &packet : batch) {
-            std::cout << packet << std::endl;
+    uint64_t virtual_time = 0;
+    std::vector<PacketInfo> current_packets;
+    while (true) {
+        if (current_packets.empty()) {
+            reader.read_batch(current_packets);
+            if (current_packets.empty()) break;
+            virtual_time = current_packets[0].time;
         }
-        std::cout << std::endl;
+        std::vector<PacketInfo>::iterator to_send = std::max_element(current_packets.begin(), current_packets.end());
+        std::cout << virtual_time << ": " << *to_send << std::endl;
+        virtual_time += to_send->length;
+        current_packets.erase(to_send);
+        reader.read_with_timeout(virtual_time, current_packets);
     }
 }
