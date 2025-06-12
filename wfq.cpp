@@ -9,16 +9,14 @@
 #include <format>
 #include <iomanip>
 
-// Information about a packet: arrival time, connection, length, and weight.
+// Information about a packet: index, arrival time, connection, length, and weight.
 //
-// A packet's priority is defined as the weight divided by the length.
-//
-// PacketInfo also implements the comparison operators (==, !=, <, >, <=, >=),
-// and they all compare by priority.
+// PacketInfo also implements the comparison operators (==, !=, <, >, <=, >=), and they all compare by priority.
 // This means, for example, that you can call std::max() on PacketInfo's,
 // and it will return the packet with the higher priority.
 class PacketInfo {
 public:
+    uint64_t index;
     // The time when the packet arrived.
     uint64_t time;
     // The packet's connection (source IP, source port, destination IP, destination port).
@@ -41,22 +39,17 @@ public:
         }
     }
 
-    // Gets the priority of the packet.
-    // Higher-priority packets will be transmitted first.
-    double priority() const {
-        return weight / length;
+    // An implementation of equality for packets.
+    bool operator==(const PacketInfo &other) const {
+        return index == other.index;
     }
 
     // An implementation of comparison for PacketInfo.
     // A packet with a higher priority compares greater.
     std::partial_ordering operator<=>(const PacketInfo &other) const {
-        return priority() <=> other.priority();
-    }
-
-    // An implementation of equality for packets.
-    // Two packets are equal if they have the same priority.
-    bool operator==(const PacketInfo &other) const {
-        return (*this <=> other) == 0;
+        std::partial_ordering order = weight / length <=> other.weight / other.length;
+        if (order != 0) return order;
+        return other.index <=> index;
     }
 };
 
@@ -69,10 +62,14 @@ class PacketReader {
     // The current weight of each connection.
     std::unordered_map<std::string, double> connection_weights;
 
+    // The number of packets read so far.
+    uint64_t num_packets = 0;
+
     // Reads a PacketInfo from an input string.
     // Also assigns it a weight according to connection_weights, or updates connection_weight, as required.
     PacketInfo parse_packet(const char *input_line) {
         PacketInfo result;
+        result.index = num_packets++;
         char sadd[32], sport[32], dadd[32], dport[32];
         int num_read = sscanf(
             input_line,
@@ -105,7 +102,7 @@ public:
     // Reads a batch of PacketInfo's from stdin.
     // A batch is defined as a sequence of packets with the same arrival time.
     // Does not read packets whose arrival time is greater than max_time.
-    // Adds all the read PacketInfo's into output.
+    // Adds all the PacketInfo's read into output.
     // Returns the number of PacketInfo's read, which may be 0.
     size_t read_batch_with_timeout(uint64_t max_time, std::vector<PacketInfo> &output) {
         std::string line;
@@ -125,7 +122,7 @@ public:
 
     // Reads a batch of PacketInfo's from stdin.
     // A batch is defined as a sequence of packets with the same arrival time.
-    // Adds all the read PacketInfo's into output.
+    // Adds all the PacketInfo's read into output.
     // Returns the number of PacketInfo's read, which may be 0.
     size_t read_batch(std::vector<PacketInfo> &output) {
         return read_batch_with_timeout(std::numeric_limits<uint64_t>::max(), output);
@@ -133,7 +130,7 @@ public:
 
     // Reads a sequence of PacketInfo's from stdin.
     // Only reads PacketInfo's whose arrival time is no more than max_time.
-    // Adds all the read PacketInfo's into output.
+    // Adds all the PacketInfo's read into output.
     // Returns the number of PacketInfo's read, which may be 0.
     size_t read_with_timeout(uint64_t max_time, std::vector<PacketInfo> &output) {
         size_t sum = 0;
