@@ -91,8 +91,8 @@ PacketInfo parse_packet(const char* input_line) {
 // Returns the number of PacketInfo's read, which may be 0.
 size_t read_batch_with_timeout(uint64_t max_time) {
 	std::string line;
-	size_t orig_size = channels.size();
-	while (true) {
+	size_t num_read;
+	for (num_read = 0;; num_read++) {
 		if (!next_packet.has_value()) {
 			if (!std::getline(std::cin, line)) break;
 			next_packet = parse_packet(line.c_str());
@@ -134,7 +134,7 @@ size_t read_batch_with_timeout(uint64_t max_time) {
 		// Reset the next_packet so we can read the next one in the next iteration.
 		next_packet.reset();
 	}
-	return channels.size() - orig_size;
+	return num_read;
 }
 
 // Reads a batch of PacketInfo's from stdin.
