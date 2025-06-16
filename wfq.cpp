@@ -13,7 +13,7 @@
 #include <functional>
 #include <cassert>
 
-// Information about a packet: index, arrival time, connection, length, and weight.
+// Information about a packet: arrival time, connection, length, and weight.
 class PacketInfo {
 public:
     // The time when the packet arrived.
@@ -35,7 +35,7 @@ public:
         }
     }
 
-    // Reads a PacketInfo from an input string.
+    // Reads a PacketInfo from a string.
     static PacketInfo parse(const char* input_line) {
         PacketInfo result;
         char sadd[32], sport[32], dadd[32], dport[32];
@@ -73,29 +73,32 @@ public:
     std::queue<PacketInfo> Q = {};
 };
 
-// A map that contains the index of each channel by its connection string.
-std::unordered_map<std::string, ChannelInfo> channelsIndexMap;
+// A map that maps connection strings (source ip, source port, destination ip, destination port) to channels.
+std::unordered_map<std::string, ChannelInfo> channelMap;
 // A small buffer for a packet that has been read from stdin but not yet added to a channel.
 std::optional<PacketInfo> next_packet;
 
+// Get a channel from channelMap, or create it if it doesnt exist yet.
 ChannelInfo &get_or_create_channel(const std::string& connection) {
-    auto iter = channelsIndexMap.find(connection);
-    if (iter != channelsIndexMap.end()) return iter->second;
+    auto iter = channelMap.find(connection);
+    // If the channel already exists, return it.
+    if (iter != channelMap.end()) return iter->second;
     // If the channel is not in the map, add it.
-    ChannelInfo new_channel{.index = channelsIndexMap.size()};
-    auto iter_and_bool = channelsIndexMap.insert({ connection, new_channel });
+    ChannelInfo new_channel{.index = channelMap.size()};
+    auto iter_and_bool = channelMap.insert({ connection, new_channel });
     return iter_and_bool.first->second;
 }
 
 // A priority queue that contains active channels, sorted by their priority and index.
 struct ActiveChannelEntry {
     // The channel.
-    // Note: this pointer points directly into channelsIndexMap.
+    // Note: this pointer points directly into channelMap.
     // This is OK because unordered_map entries are guaranteed to have a stable address in memory.
     ChannelInfo *channel;
     // The channel's priority when it was added to the priority queue.
     double priority_snapshot;
 
+    // Compares the priority of two channels.
     bool operator<(const ActiveChannelEntry& other) const {
         if (priority_snapshot != other.priority_snapshot)
             return priority_snapshot > other.priority_snapshot;
@@ -115,20 +118,23 @@ void mark_channel_active(ChannelInfo &channel) {
 // Reads a batch of PacketInfo's from stdin.
 // A batch is defined as a sequence of packets with the same arrival time.
 // Does not read packets whose arrival time is greater than max_time.
-// Adds all the PacketInfo's read into channels.
+// Adds all the PacketInfo's read into the appropriate channels (and creates new channels if necessary).
 // Returns the number of PacketInfo's read, which may be 0.
 size_t read_batch_with_timeout(uint64_t max_time) {
     std::string line;
     size_t num_read;
     for (num_read = 0;; num_read++) {
         if (!next_packet.has_value()) {
+            // If no packet has already been read, read a packet from stdin.
             if (!std::getline(std::cin, line)) break;
             next_packet = PacketInfo::parse(line.c_str());
         }
 		// If the next packet's time is greater than max_time, stop reading.
         if (next_packet->time > max_time) break;
-        max_time = std::min(max_time, next_packet->time);
+        // Don't read further packets if their arrival time is greater than the current packet's.
+        max_time = next_packet->time;
 
+        // Get or create a channel, and add the new packet to it.
         ChannelInfo &channel = get_or_create_channel(next_packet->connection);
         channel.Q.push(*next_packet);
         if (next_packet->weight.has_value()) {
@@ -145,15 +151,15 @@ size_t read_batch_with_timeout(uint64_t max_time) {
 
 // Reads a batch of PacketInfo's from stdin.
 // A batch is defined as a sequence of packets with the same arrival time.
-// Adds all the PacketInfo's read into channels.
+// Adds all the PacketInfo's read into the appropriate channels (and creates new channels if necessary).
 // Returns the number of PacketInfo's read, which may be 0.
 size_t read_batch() {
     return read_batch_with_timeout(std::numeric_limits<uint64_t>::max());
 }
 
 // Reads a sequence of PacketInfo's from stdin.
-// Only reads PacketInfo's whose arrival time is no more than max_time.
-// Adds all the PacketInfo's read into channels.
+// Does not read packets whose arrival time is greater than max_time.
+// Adds all the PacketInfo's read into the appropriate channels (and creates new channels if necessary).
 // Returns the number of PacketInfo's read, which may be 0.
 size_t read_with_timeout(uint64_t max_time) {
     size_t sum = 0;
@@ -180,7 +186,7 @@ int main() {
         active_channels.pop();
         PacketInfo p = ch.Q.front();
         ch.Q.pop();
-        
+
         std::cout << time << ": " << p << std::endl;
         time += p.length;
 
@@ -188,6 +194,7 @@ int main() {
             mark_channel_active(ch);
         }
         
+        // Check if, while sending this packet, new packets have arrived.
         read_with_timeout(time);
     }
 }
