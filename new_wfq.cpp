@@ -26,13 +26,12 @@ public:
 	uint64_t length = 0;
 	// The packet's weight.
 	double weight = 1.0;
-	// This field is true if the packet was received with the weight written explicitly,
-	// and thus should also be output with an explicit weight.
-	bool should_print_with_weight = false;
+	// This field is true if the packet was received with the weight written explicitly.
+	bool has_explicit_weight = false;
 
 	// Implementation of printing for PacketInfo.
 	friend std::ostream& operator<<(std::ostream& os, const PacketInfo& self) {
-		if (self.should_print_with_weight) {
+		if (self.has_explicit_weight) {
 			return os << std::format("{} {} {} {:.2f}", self.time, self.connection, self.length, self.weight);
 		}
 		else {
@@ -72,10 +71,10 @@ PacketInfo parse_packet(const char* input_line) {
 	);
 	result.connection = std::format("{} {} {} {}", sadd, sport, dadd, dport);
 	if (num_read == 6) {
-		result.should_print_with_weight = false;
+		result.has_explicit_weight = false;
 	}
 	else if (num_read == 7) {
-		result.should_print_with_weight = true;
+		result.has_explicit_weight = true;
 	}
 	else {
 		// If the input line did not contain exactly 6 or 7 parameters, that's an error.
@@ -114,7 +113,7 @@ size_t read_batch_with_timeout(uint64_t max_time) {
 				channelsIndexMap[next_packet->connection] = new_channel.index;
 			}
 			new_channel.connection = next_packet->connection;
-			if (next_packet->should_print_with_weight) {
+			if (next_packet->has_explicit_weight) {
 				new_channel.weight = next_packet->weight;
 			}
 			else {
@@ -128,7 +127,7 @@ size_t read_batch_with_timeout(uint64_t max_time) {
 			// If the channel already exists, add the packet to its queue.
 			iter->second->Q.push(*next_packet);
 			// Update the weight if the packet has an explicit weight.
-			if (next_packet->should_print_with_weight) {
+			if (next_packet->has_explicit_weight) {
 				iter->second->weight = next_packet->weight;
 			}
 		}
