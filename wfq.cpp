@@ -13,6 +13,11 @@
 #include <functional>
 #include <cassert>
 
+// A program that implements a Weighted Fair Queueing (WFQ) algorithm for packet scheduling.
+
+// Virtual time, which is used to calculate the priority of channels.
+double virtual_time = 0;
+
 // Information about a packet: arrival time, connection, length, and weight.
 class PacketInfo {
 public:
@@ -69,6 +74,10 @@ public:
     uint64_t index = 0;
     // The channel's weight.
     double weight = 1.0;
+	// Last finish time of the channel.
+    double last_finish_time = 0;
+	// A flag that indicates whether the channel is currently active (has packets ready to send).
+    bool is_active = false;
     // A queue of packets that are waiting to be transmitted on this channel.
     std::queue<PacketInfo> Q = {};
 };
@@ -109,11 +118,22 @@ struct ActiveChannelEntry {
 std::priority_queue<ActiveChannelEntry> active_channels;
 
 // Add a new channel to active_channels.
-void mark_channel_active(ChannelInfo &channel) {
+void mark_channel_active(ChannelInfo& channel) {
     assert(!channel.Q.empty());
-    double prio = static_cast<double>(channel.Q.front().length) / channel.weight;
-    active_channels.push({ &channel, prio });
+    const PacketInfo& packet = channel.Q.front();
+
+    // Compute start time for this packet
+    double start_time = std::max(virtual_time, channel.last_finish_time);
+    // Compute virtual finish time based on weight
+    double finish_time = start_time + static_cast<double>(packet.length) / channel.weight;
+
+    // Save for the next packet from this channel
+    channel.last_finish_time = finish_time;
+    channel.is_active = true;
+    // Insert into priority queue with finish time as the priority
+    active_channels.push({ &channel, finish_time });
 }
+
 
 // Reads a batch of PacketInfo's from stdin.
 // A batch is defined as a sequence of packets with the same arrival time.
@@ -180,10 +200,12 @@ int main() {
 			if (read_batch() == 0) break; // If no packets were read, exit the loop.
             time = active_channels.top().channel->Q.front().time;
         }
-
         // Process the channel with the highest priority.
-        auto &ch = *active_channels.top().channel;
+        virtual_time = std::max(virtual_time, active_channels.top().priority_snapshot);
+        auto* channel = active_channels.top().channel;
         active_channels.pop();
+        channel->is_active = false;
+        auto& ch = *channel;
         PacketInfo p = ch.Q.front();
         ch.Q.pop();
 
