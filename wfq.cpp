@@ -1,16 +1,16 @@
 #define _CRT_SECURE_NO_WARNINGS
 
-
 #include <iostream>
-#include <ostream>
 #include <sstream>
 #include <optional>
 #include <vector>
 #include <queue>
-#include <compare>
 #include <unordered_map>
 #include <format>
 #include <iomanip>
+#include <limits>
+#include <string>
+#include <functional>
 
 // Information about a packet: index, arrival time, connection, length, and weight.
 //
@@ -19,25 +19,20 @@
 // and it will return the packet with the higher priority.
 class PacketInfo {
 public:
-    // The packet's index in the input.
-    uint64_t index;
     // The time when the packet arrived.
-    uint64_t time;
+    uint64_t time = 0;
     // The packet's connection (source IP, source port, destination IP, destination port).
-    std::string connection;
+    std::string connection = "";
     // The packet's length.
-    uint64_t length;
+    uint64_t length = 0;
     // The packet's weight.
-    double weight;
-    // This field is true if the packet was received with the weight written explicitly,
-    // and thus should also be output with an explicit weight.
-    bool should_print_with_weight;
-    // Virtual time when the packet was finished being processed.
-    double finish_tag;
+    double weight = 1.0;
+    // This field is true if the packet was received with the weight written explicitly.
+    bool has_explicit_weight = false;
 
     // Implementation of printing for PacketInfo.
     friend std::ostream& operator<<(std::ostream& os, const PacketInfo& self) {
-        if (self.should_print_with_weight) {
+        if (self.has_explicit_weight) {
             return os << std::format("{} {} {} {:.2f}", self.time, self.connection, self.length, self.weight);
         }
         else {
@@ -46,142 +41,186 @@ public:
     }
 };
 
-// Comparison operators for PacketInfo, which compare by finish_tag.
-struct PacketComparator {
-    bool operator()(const PacketInfo& a, const PacketInfo& b) const {
-        if (a.finish_tag != b.finish_tag) return a.finish_tag > b.finish_tag;
-        // If the finish tags are equal, just take a.
-        return false;
-    }
+// An object that contains information about a channel.
+// A channel is defined by its index, weight, connection, and a queue of packets that are waiting to be transmitted on this channel.
+class ChannelInfo {
+public:
+    // The channel's index in the input.
+    uint64_t index = 0;
+    // The channel's weight.
+    double weight = 1.0;
+    // The channel's connection (source IP, source port, destination IP, destination port).
+    std::string connection = "";
+    // A queue of packets that are waiting to be transmitted on this channel.
+    std::queue<PacketInfo> Q = {};
 };
 
-// An object that reads packet from stdin.
-// A PacketReader can read a single packet, or a sequence of packets.
-class PacketReader {
-    // A packet that has been read but not yet yielded by one of the read_* methods.
-    std::optional<PacketInfo> next_packet;
+// A map that contains the index of each channel by its connection string.
+std::unordered_map<std::string, uint64_t> channelsIndexMap;
+// A vector of ChannelInfo objects, each representing a channel.
+std::vector<ChannelInfo> channels;
+// A queue of PacketInfo objects, each representing a packet that is waiting to be processed.
+std::optional<PacketInfo> next_packet;
 
-    // The current weight of each connection.
-    std::unordered_map<std::string, double> connection_weights;
+// A priority queue that contains active channels, sorted by their priority and index.
+struct ActiveChannelEntry {
+    uint64_t index;
+    double priority_snapshot;
 
-    // The number of packets read so far.
-    uint64_t num_packets = 0;
+    bool operator<(const ActiveChannelEntry& other) const {
+        if (priority_snapshot != other.priority_snapshot)
+            return priority_snapshot > other.priority_snapshot;
+        return index > other.index;
+    }
+};
+std::priority_queue<ActiveChannelEntry> active_channels;
 
-    // Reads a PacketInfo from an input string.
-    // Also assigns it a weight according to connection_weights, or updates connection_weight, as required.
-    PacketInfo parse_packet(const char* input_line) {
-        PacketInfo result;
-        result.index = num_packets++;
-        char sadd[32], sport[32], dadd[32], dport[32];
-        int num_read = sscanf(
-            input_line,
-            "%llu %31s %31s %31s %31s %llu %lf",
-            &result.time, sadd, sport, dadd, dport, &result.length, &result.weight
-        );
-        result.connection = std::format("{} {} {} {}", sadd, sport, dadd, dport);
-        if (num_read == 6) {
-            // If a weight was not explicitly given in the input line,
-            // take the existing weight from connection_weights, or 1.
-            auto iter = connection_weights.find(result.connection);
-            result.weight = (iter == connection_weights.end() ? 1 : iter->second);
-            result.should_print_with_weight = false;
+// Reads a PacketInfo from an input string.
+// Also assigns it a weight according to connection_weights, or updates connection_weight, as required.
+PacketInfo parse_packet(const char* input_line) {
+    PacketInfo result;
+    char sadd[32], sport[32], dadd[32], dport[32];
+    int num_read = sscanf(
+        input_line,
+        "%llu %31s %31s %31s %31s %llu %lf",
+        &result.time, sadd, sport, dadd, dport, &result.length, &result.weight
+    );
+    result.connection = std::format("{} {} {} {}", sadd, sport, dadd, dport);
+    if (num_read == 6) {
+        result.has_explicit_weight = false;
+    }
+    else if (num_read == 7) {
+        result.has_explicit_weight = true;
+    }
+    else {
+        // If the input line did not contain exactly 6 or 7 parameters, that's an error.
+        std::cerr << "bad input line: " << input_line << std::endl;
+        std::abort();
+    }
+    return result;
+}
+
+// Reads a batch of PacketInfo's from stdin.
+// A batch is defined as a sequence of packets with the same arrival time.
+// Does not read packets whose arrival time is greater than max_time.
+// Adds all the PacketInfo's read into channels.
+// Returns the number of PacketInfo's read, which may be 0.
+size_t read_batch_with_timeout(uint64_t max_time) {
+    std::string line;
+    size_t num_read;
+    for (num_read = 0;; num_read++) {
+        if (!next_packet.has_value()) {
+            if (!std::getline(std::cin, line)) break;
+            next_packet = parse_packet(line.c_str());
         }
-        else if (num_read == 7) {
-            // If a weight was explicitly given in the input line,
-            // update connection_weights accordingly.
-            connection_weights.insert_or_assign(result.connection, result.weight);
-            result.should_print_with_weight = true;
+		// If the next packet's time is greater than max_time, stop reading.
+        if (next_packet->time > max_time) break;
+        max_time = std::min(max_time, next_packet->time);
+
+        auto iter = channelsIndexMap.find(next_packet->connection);
+        uint64_t idx;
+        if (iter == channelsIndexMap.end()) {
+			// If the channel is not in the map, add it.
+            idx = channels.size();
+            channelsIndexMap[next_packet->connection] = idx;
+            ChannelInfo new_channel;
+            new_channel.index = idx;
+            new_channel.connection = next_packet->connection;
+            new_channel.weight = next_packet->has_explicit_weight ? next_packet->weight : 1.0;
+            channels.push_back(new_channel);
         }
         else {
-            // If the input line did not contain exactly 6 or 7 parameters, that's an error.
-            std::cerr << "bad input line: " << input_line << std::endl;
-            std::abort();
-        }
-        return result;
-    }
-
-public:
-    // Reads a batch of PacketInfo's from stdin.
-    // A batch is defined as a sequence of packets with the same arrival time.
-    // Does not read packets whose arrival time is greater than max_time.
-    // Adds all the PacketInfo's read into output.
-    // Returns the number of PacketInfo's read, which may be 0.
-    size_t read_batch_with_timeout(uint64_t max_time, std::vector<PacketInfo>& output) {
-        std::string line;
-        size_t orig_size = output.size();
-        while (true) {
-            if (!next_packet.has_value()) {
-                if (!std::getline(std::cin, line)) break;
-                next_packet = parse_packet(line.c_str());
+            idx = iter->second;
+            if (next_packet->has_explicit_weight) {
+				// If the packet has an explicit weight, update the channel's weight.
+                channels[idx].weight = next_packet->weight;
+                if (!channels[idx].Q.empty()) {
+                    double prio = static_cast<double>(channels[idx].Q.front().length) / channels[idx].weight;
+                    active_channels.push({ idx, prio });
+                }
             }
-            if (next_packet->time > max_time) break;
-            max_time = std::min(max_time, next_packet->time);
-            output.push_back(*next_packet);
-            next_packet.reset();
         }
-        return output.size() - orig_size;
-    }
-
-    // Reads a batch of PacketInfo's from stdin.
-    // A batch is defined as a sequence of packets with the same arrival time.
-    // Adds all the PacketInfo's read into output.
-    // Returns the number of PacketInfo's read, which may be 0.
-    size_t read_batch(std::vector<PacketInfo>& output) {
-        return read_batch_with_timeout(std::numeric_limits<uint64_t>::max(), output);
-    }
-
-    // Reads a sequence of PacketInfo's from stdin.
-    // Only reads PacketInfo's whose arrival time is no more than max_time.
-    // Adds all the PacketInfo's read into output.
-    // Returns the number of PacketInfo's read, which may be 0.
-    size_t read_with_timeout(uint64_t max_time, std::vector<PacketInfo>& output) {
-        size_t sum = 0;
-        while (true) {
-            size_t count = read_batch_with_timeout(max_time, output);
-            if (count == 0) break;
-            sum += count;
+        channels[idx].Q.push(*next_packet);
+        if (channels[idx].Q.size() == 1) {
+			// If this is the first packet in the channel, calculate its priority and add it to the active channels.
+            double prio = static_cast<double>(channels[idx].Q.front().length) / channels[idx].weight;
+            active_channels.push({ idx, prio });
         }
-        return sum;
+        next_packet.reset();
     }
-};
+    return num_read;
+}
 
-int main() {
-    PacketReader reader;
-    uint64_t time = 0;
-    double V = 0.0;
-    std::unordered_map<std::string, double> last_finish;
-    std::priority_queue<PacketInfo, std::vector<PacketInfo>, PacketComparator> Q;
+// Reads a batch of PacketInfo's from stdin.
+// A batch is defined as a sequence of packets with the same arrival time.
+// Adds all the PacketInfo's read into channels.
+// Returns the number of PacketInfo's read, which may be 0.
+size_t read_batch() {
+    return read_batch_with_timeout(std::numeric_limits<uint64_t>::max());
+}
 
+// Reads a sequence of PacketInfo's from stdin.
+// Only reads PacketInfo's whose arrival time is no more than max_time.
+// Adds all the PacketInfo's read into channels.
+// Returns the number of PacketInfo's read, which may be 0.
+size_t read_with_timeout(uint64_t max_time) {
+    size_t sum = 0;
     while (true) {
-        if (Q.empty()) {
-            std::vector<PacketInfo> first_batch;
-            reader.read_batch(first_batch);
-            if (first_batch.empty()) break;
-            time = first_batch[0].time;
-            V = 0.0;
-            last_finish.clear();
-            for (auto& p : first_batch) {
-                double S = std::max(V, last_finish[p.connection]);
-                double F = S + double(p.length) / p.weight;
-                p.finish_tag = F;
-                last_finish[p.connection] = F;
-                Q.push(p);
+        size_t count = read_batch_with_timeout(max_time);
+        if (count == 0) break;
+        sum += count;
+    }
+    return sum;
+}
+
+// The main function that processes the input and outputs the results.
+int main() {
+    uint64_t time = 0;
+    while (true) {
+        if (active_channels.empty()) {
+			// If there are no active channels, read a batch of packets.
+			if (read_batch() == 0) break; // If no packets were read, exit the loop.
+
+            for (size_t i = 0; i < channels.size(); ++i) {
+                if (!channels[i].Q.empty()) {
+					// If the channel has packets, calculate its priority and add it to the active channels.
+                    double prio = static_cast<double>(channels[i].Q.front().length) / channels[i].weight;
+                    active_channels.push({ i, prio });
+                }
             }
+            time = channels[active_channels.top().index].Q.front().time;
         }
 
-        PacketInfo p = Q.top(); Q.pop();
-        std::cout << time << ": " << p << std::endl;
-        time += p.length;
-        V = p.finish_tag;
+        while (!active_channels.empty()) {
+			// Process the channel with the highest priority.
+            auto top = active_channels.top();
+            const auto& ch = channels[top.index];
+            if (ch.Q.empty()) {
+                active_channels.pop();
+                continue;
+            }
+			// If the channel's priority has changed, update it in the priority queue.
+            double current_priority = static_cast<double>(ch.Q.front().length) / ch.weight;
+            if (current_priority != top.priority_snapshot) {
+                active_channels.pop();
+                active_channels.push({ top.index, current_priority });
+                continue;
+            }
 
-        std::vector<PacketInfo> arrivals;
-        reader.read_with_timeout(time, arrivals);
-        for (auto& q : arrivals) {
-            double S = std::max(V, last_finish[q.connection]);
-            double F = S + double(q.length) / q.weight;
-            q.finish_tag = F;
-            last_finish[q.connection] = F;
-            Q.push(q);
+            active_channels.pop();
+            PacketInfo p = channels[top.index].Q.front();
+            channels[top.index].Q.pop();
+            std::cout << time << ": " << p << std::endl;
+            time += p.length;
+
+            if (!channels[top.index].Q.empty()) {
+				// If there are more packets in the channel, calculate the next priority and add it back to the active channels.
+                double next_priority = static_cast<double>(channels[top.index].Q.front().length) / channels[top.index].weight;
+                active_channels.push({ top.index, next_priority });
+            }
+
+            read_with_timeout(time);
+            break;
         }
     }
 }
