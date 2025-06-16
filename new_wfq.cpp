@@ -57,8 +57,8 @@ public:
 
 std::unordered_map<std::string, double>  channelsIndexMap;
 std::unordered_map<std::string, ChannelInfo*>  channelsMap;
-std::vector<ChannelInfo> channels;
-
+std::list<ChannelInfo> channels;
+std::optional<PacketInfo> next_packet;
 
 // Reads a PacketInfo from an input string.
 // Also assigns it a weight according to connection_weights, or updates connection_weight, as required.
@@ -93,7 +93,6 @@ PacketInfo parse_packet(const char* input_line) {
 size_t read_batch_with_timeout(uint64_t max_time) {
 	std::string line;
 	size_t orig_size = channels.size();
-	std::optional<PacketInfo> next_packet;
 	while (true) {
 		if (!next_packet.has_value()) {
 			if (!std::getline(std::cin, line)) break;
