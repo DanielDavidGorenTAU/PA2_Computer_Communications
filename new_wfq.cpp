@@ -54,7 +54,7 @@ public:
 	std::queue<PacketInfo> Q = {};
 };
 
-std::unordered_map<std::string, double>  channelsIndexMap;
+std::unordered_map<std::string, uint64_t> channelsIndexMap;
 std::unordered_map<std::string, ChannelInfo*>  channelsMap;
 std::list<ChannelInfo> channels;
 std::optional<PacketInfo> next_packet;
